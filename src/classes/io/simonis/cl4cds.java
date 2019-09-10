@@ -26,32 +26,15 @@
 
 package io.simonis;
 
-import java.io.BufferedReader;
-import java.io.DataInputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.PrintStream;
+import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Scanner;
-import java.util.Set;
+import java.util.*;
 import java.util.jar.JarFile;
 import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
-
-import javax.naming.directory.DirContext;
 
 /**
  * @author simonis
@@ -63,6 +46,7 @@ public class cl4cds {
   private static final boolean DBG = Boolean.getBoolean("io.simonis.cl4cds.debug");
   private static final boolean DumpFromClassFiles = Boolean.getBoolean("io.simonis.cl4cds.dumpFromClassFile");
   private static final boolean CompactIDs = Boolean.parseBoolean(System.getProperty("io.simonis.cl4cds.compactIDs", "true"));
+  private static final boolean ClassesOnly = Boolean.parseBoolean(System.getProperty("io.simonis.cl4cds.classesOnly", "false"));
   
   private enum Status {
     OK, ERROR, PRE_15, LOAD_ERROR, ZIP_ERROR, JAR_ERROR
@@ -127,7 +111,7 @@ public class cl4cds {
       String line;
       long objectID = 0;
       Set<String> klassSet = new HashSet<>();
-      Map<String, String> nameSourceMap = new HashMap<>();
+      Set<String> klassNameSet = new HashSet<>();
       while((line = in.readLine()) != null) {
         if (firstLine.reset(line).matches()) {
           MatchResult mr1 = firstLine.toMatchResult();
@@ -171,11 +155,16 @@ public class cl4cds {
 
             if ("NULL class loader".equals(loader) ||
                 loader.contains("of <bootloader>") || // this is JDK 11 syntax
+                loader.contains("of 'bootstrap'") || // this is JDK 12 syntax
                 loader.contains("jdk/internal/loader/ClassLoaders$PlatformClassLoader" /* && source == jrt image */) ||
                 loader.contains("jdk/internal/loader/ClassLoaders$AppClassLoader" /* && source == jar file */)) {
-              out.println(name.replace('.', '/') + " id: " + klass);
+              out.print(name.replace('.', '/'));
+              if (!ClassesOnly) {
+                out.print(" id: " + klass);
+              }
+              out.println();
               klassSet.add(klass);
-              nameSourceMap.put(name, source);
+              klassNameSet.add(name);
             }
             else {
               // Custom class loader (currently only supported if classes are loaded from jar files ?)
@@ -190,10 +179,14 @@ public class cl4cds {
                 System.err.println("Skipping " + name + " from " + source + " - reason: unknown source format");
                 continue;
               }
-              if (!DumpFromClassFiles && Files.isDirectory(Paths.get(sourceFile))) {
-                System.err.println("Skipping " + name + " from " + sourceFile + " - reason: loaded from class file (try '-Dio.simonis.cl4cds.dumpFromClassFile=true')");
-                continue;
-              }
+              if (!DumpFromClassFiles)
+                if (sourceFile.startsWith("/") && sourceFile.charAt(2) == ':') {
+                  sourceFile = sourceFile.substring(1);   // to remove leading slash from paths like '/C:/Users/...'
+                }
+                if (Files.isDirectory(Paths.get(sourceFile))) {
+                  System.err.println("Skipping " + name + " from " + sourceFile + " - reason: loaded from class file (try '-Dio.simonis.cl4cds.dumpFromClassFile=true')");
+                  continue;
+                }
               Status ret;
 
               if (sourceFile.endsWith(".jar") && sourceFile.contains(".jar!")) {
@@ -216,23 +209,27 @@ public class cl4cds {
                 }
                 continue;
               }
+              if (klassNameSet.contains(name)) {
+                System.err.println("Skipping " + name + " from " + sourceFile + " - reason: already dumped");
+                continue;
+              }
               List<String> deps = new LinkedList<>();
               deps.add(parent);
               if (interf != null) {
                 deps.addAll(Arrays.asList(interf.split("\\s")));
               }
               if (klassSet.containsAll(deps)) {
-                if (source.equals(nameSourceMap.get(name))) {
-                  System.err.println("Skipping " + name + " from " + sourceFile + " - reason: already dumped");
-                  continue;
+                out.print(name.replace('.', '/'));
+                if (!ClassesOnly) {
+                  out.print(" id: " + klass + " super: " + parent);
+                  if (interf != null) {
+                    out.print(" interfaces: " + interf);
+                  }
+                  out.print(" source: " + sourceFile);
                 }
-                out.print(name.replace('.', '/') + " id: " + klass + " super: " + parent);
-                if (interf != null) {
-                  out.print(" interfaces: " + interf);
-                }
-                out.println(" source: " + sourceFile);
+                out.println();
                 klassSet.add(klass);
-                nameSourceMap.put(name, source);
+                klassNameSet.add(name);
               }
               else {
                 System.err.println("Skipping " + name + " from " + sourceFile + " - reason: failed dependencies");
@@ -405,6 +402,8 @@ public class cl4cds {
     System.out.println("       If application classes are loaded from a \"fat\" JAR file (i.e. a JAR");
     System.out.println("       which contains other, nested JAR files), these nested JAR files will be");
     System.out.println("       extracted to <directory> (defaults to './tmp')");
+    System.out.println("    -Dio.simonis.cl4cds.classesOnly=false :");
+    System.out.println("       Inlcude pure class FQ names into output (without IDs, super, interface, etc)");
     System.out.println();
     System.exit(status);
   }
